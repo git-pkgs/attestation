@@ -26,7 +26,7 @@ fmt.Println(att.BuilderID, att.SourceRepository, att.SourceRevision)
 `Parse` extracts identity fields. It does **not** verify the signature, certificate chain, or transparency-log inclusion proof. Pair with a separate verifier:
 
 ```
-go get github.com/git-pkgs/sigstore-verifier
+go get github.com/git-pkgs/sigstore
 ```
 
 The split is deliberate: parsing identity is stdlib-only and useful in contexts where you just want to *record* what was claimed (SBOMs, audit logs, summary reports). Verification adds a heavier dependency tree (sigstore-go, TUF) and isn't always needed.
