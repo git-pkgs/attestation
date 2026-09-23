@@ -37,4 +37,4 @@ This package imports nothing beyond Go's standard library. No project-specific t
 
 ## License
 
-MIT
+[MIT](LICENSE).
