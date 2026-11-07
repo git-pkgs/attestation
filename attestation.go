@@ -30,6 +30,11 @@ const (
 	digestAlgGitCommit = "gitCommit"
 )
 
+const (
+	inTotoStatementV01Type = "https://in-toto.io/Statement/v0.1"
+	inTotoStatementV1Type  = "https://in-toto.io/Statement/v1"
+)
+
 // Attestation is the identity-side projection of an in-toto statement. Field
 // names follow the SLSA v1 vocabulary; other predicate types may leave those
 // fields empty.
@@ -146,7 +151,9 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 		if err := json.Unmarshal(raw, &stmt); err != nil {
 			return nil, fmt.Errorf("decode in-toto statement: %w", err)
 		}
-		attestation = attestationFromStatement(stmt)
+		if supportedStatementType(stmt.Type) {
+			attestation = attestationFromStatement(stmt)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -158,10 +165,20 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 }
 
 func parseEnvelope(envelope dsseEnvelope, material verificationMaterial) (*Attestation, error) {
-	if envelope.Payload == "" {
+	if envelope.Payload == nil {
 		return nil, nil
 	}
-	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if bytes.Equal(bytes.TrimSpace(envelope.Payload), []byte("null")) {
+		return nil, errors.New("DSSE payload is null")
+	}
+	var encodedPayload string
+	if err := json.Unmarshal(envelope.Payload, &encodedPayload); err != nil {
+		return nil, fmt.Errorf("decode DSSE payload field: %w", err)
+	}
+	if encodedPayload == "" {
+		return nil, nil
+	}
+	payload, err := base64.StdEncoding.DecodeString(encodedPayload)
 	if err != nil {
 		return nil, fmt.Errorf("decode DSSE payload: %w", err)
 	}
@@ -169,9 +186,16 @@ func parseEnvelope(envelope dsseEnvelope, material verificationMaterial) (*Attes
 	if err := json.Unmarshal(payload, &stmt); err != nil {
 		return nil, fmt.Errorf("decode in-toto statement: %w", err)
 	}
+	if !supportedStatementType(stmt.Type) {
+		return nil, nil
+	}
 	attestation := attestationFromStatement(stmt)
 	attestation.SignerIdentity = extractSignerIdentity(material)
 	return attestation, nil
+}
+
+func supportedStatementType(value string) bool {
+	return value == inTotoStatementV01Type || value == inTotoStatementV1Type
 }
 
 func attestationFromStatement(stmt statement) *Attestation {
@@ -220,7 +244,7 @@ type bundle struct {
 }
 
 type dsseEnvelope struct {
-	Payload string `json:"payload"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 type verificationMaterial struct {
@@ -237,6 +261,7 @@ type chain struct {
 }
 
 type statement struct {
+	Type          string    `json:"_type"`
 	PredicateType string    `json:"predicateType"`
 	Subjects      []subject `json:"subject"`
 	Predicate     predicate `json:"predicate"`
