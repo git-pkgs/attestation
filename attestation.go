@@ -136,6 +136,9 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 	var err error
 	switch {
 	case shape.DSSEEnvelope != nil:
+		if bytes.Equal(bytes.TrimSpace(shape.DSSEEnvelope), []byte("null")) {
+			return nil, errors.New("DSSE envelope is null")
+		}
 		var b bundle
 		if err := json.Unmarshal(raw, &b); err != nil {
 			return nil, fmt.Errorf("decode bundle: %w", err)

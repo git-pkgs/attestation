@@ -147,6 +147,7 @@ func TestParseAllIgnoresUnrecognizedFieldTypes(t *testing.T) {
 
 func TestParseAllRejectsRecognizedMalformedDocuments(t *testing.T) {
 	for _, body := range []string{
+		`{"dsseEnvelope":null}`,
 		`{"payload":123,"payloadType":"application/vnd.in-toto+json","signatures":[]}`,
 		`{"payload":null,"payloadType":"application/vnd.in-toto+json","signatures":[]}`,
 		`{"_type":"https://in-toto.io/Statement/v1"}`,
