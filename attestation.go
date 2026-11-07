@@ -135,13 +135,13 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 			return nil, fmt.Errorf("decode bundle: %w", err)
 		}
 		attestation, err = parseEnvelope(b.DSSEEnvelope, b.VerificationMaterial)
-	case shape.Payload != "":
+	case shape.Payload != nil && (shape.PayloadType != nil || shape.Signatures != nil):
 		var envelope dsseEnvelope
 		if err := json.Unmarshal(raw, &envelope); err != nil {
 			return nil, fmt.Errorf("decode DSSE envelope: %w", err)
 		}
 		attestation, err = parseEnvelope(envelope, verificationMaterial{})
-	case shape.PredicateType != "":
+	case shape.PredicateType != nil && shape.StatementType != nil:
 		var stmt statement
 		if err := json.Unmarshal(raw, &stmt); err != nil {
 			return nil, fmt.Errorf("decode in-toto statement: %w", err)
@@ -207,8 +207,11 @@ func attestationFromStatement(stmt statement) *Attestation {
 
 type documentShape struct {
 	DSSEEnvelope  json.RawMessage `json:"dsseEnvelope"`
-	Payload       string          `json:"payload"`
-	PredicateType string          `json:"predicateType"`
+	Payload       json.RawMessage `json:"payload"`
+	PayloadType   json.RawMessage `json:"payloadType"`
+	Signatures    json.RawMessage `json:"signatures"`
+	PredicateType json.RawMessage `json:"predicateType"`
+	StatementType json.RawMessage `json:"_type"`
 }
 
 type bundle struct {

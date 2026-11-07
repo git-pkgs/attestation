@@ -126,6 +126,30 @@ func TestParseAllArrayAndUnrecognizedObject(t *testing.T) {
 	}
 }
 
+func TestParseAllIgnoresUnrecognizedFieldTypes(t *testing.T) {
+	statement := buildStatement(t, "https://example.com/predicate/v1", "", "", "")
+	body := append(append(statement, '\n'), []byte(`{"payload":123,"predicateType":[],"name":"unrelated"}`)...)
+
+	attestations, err := ParseAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attestations) != 1 || attestations[0].PredicateType != "https://example.com/predicate/v1" {
+		t.Fatalf("attestations = %#v", attestations)
+	}
+}
+
+func TestParseAllRejectsRecognizedMalformedDocuments(t *testing.T) {
+	for _, body := range []string{
+		`{"payload":123,"payloadType":"application/vnd.in-toto+json","signatures":[]}`,
+		`{"_type":"https://in-toto.io/Statement/v1","predicateType":[]}`,
+	} {
+		if _, err := ParseAll([]byte(body)); err == nil {
+			t.Errorf("ParseAll accepted %s", body)
+		}
+	}
+}
+
 func TestParseAllMalformedDocument(t *testing.T) {
 	if _, err := ParseAll([]byte("{}\n{not-json")); err == nil {
 		t.Fatal("ParseAll accepted malformed JSONL")
