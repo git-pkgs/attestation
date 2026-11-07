@@ -51,6 +51,12 @@ func buildEnvelope(t *testing.T, statement []byte) []byte {
 	return out
 }
 
+func buildEnvelopeBundle(t *testing.T, envelope []byte) []byte {
+	t.Helper()
+	out, _ := json.Marshal(map[string]any{"dsseEnvelope": json.RawMessage(envelope)})
+	return out
+}
+
 func TestParse_HappyPath(t *testing.T) {
 	body := buildBundle(t,
 		"https://slsa.dev/provenance/v1",
@@ -152,6 +158,56 @@ func TestParseAllRejectsRecognizedMalformedDocuments(t *testing.T) {
 	}
 }
 
+func TestParseAllKeepsClaimsFromUnrelatedPredicates(t *testing.T) {
+	statement := []byte(`{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://example.com/predicate/v1","subject":[{"name":"artifact","digest":{"sha256":"abcd"}}],"predicate":{"runDetails":{"builder":"external"}}}`)
+	envelope := buildEnvelope(t, statement)
+	for _, body := range [][]byte{statement, envelope, buildEnvelopeBundle(t, envelope)} {
+		attestations, err := ParseAll(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(attestations) != 1 || attestations[0].PredicateType != "https://example.com/predicate/v1" ||
+			len(attestations[0].Subjects) != 1 || attestations[0].Subjects[0].Name != "artifact" {
+			t.Fatalf("attestations = %#v", attestations)
+		}
+		if attestations[0].BuilderID != "" {
+			t.Errorf("BuilderID = %q", attestations[0].BuilderID)
+		}
+	}
+}
+
+func TestParseAllRejectsEmptyPredicateTypesAcrossForms(t *testing.T) {
+	for _, statement := range [][]byte{
+		[]byte(`{"_type":"https://in-toto.io/Statement/v1","predicate":{}}`),
+		[]byte(`{"_type":"https://in-toto.io/Statement/v1","predicateType":null,"predicate":{}}`),
+	} {
+		envelope := buildEnvelope(t, statement)
+		for _, body := range [][]byte{statement, envelope, buildEnvelopeBundle(t, envelope)} {
+			if _, err := ParseAll(body); err == nil {
+				t.Errorf("ParseAll accepted %s", body)
+			}
+		}
+	}
+}
+
+func TestParseAllIgnoresOtherEnvelopePayloadTypes(t *testing.T) {
+	statement := buildStatement(t, "https://example.com/predicate/v1", "", "", "")
+	envelope, _ := json.Marshal(map[string]any{
+		"payloadType": "application/json",
+		"payload":     base64.StdEncoding.EncodeToString(statement),
+		"signatures":  []any{},
+	})
+	for _, body := range [][]byte{envelope, buildEnvelopeBundle(t, envelope)} {
+		attestations, err := ParseAll(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(attestations) != 0 {
+			t.Errorf("attestations = %#v", attestations)
+		}
+	}
+}
+
 func TestParseAllIgnoresUnsupportedStatementTypes(t *testing.T) {
 	statement := []byte(`{"_type":"https://example.com/Statement/v1","predicateType":"https://example.com/predicate/v1"}`)
 	for _, body := range [][]byte{statement, buildEnvelope(t, statement)} {
@@ -183,6 +239,17 @@ func TestParse_EmptyPayload(t *testing.T) {
 	att, err := Parse(body)
 	if err != nil || att != nil {
 		t.Errorf("Parse(empty-payload) = (%v, %v), want (nil, nil)", att, err)
+	}
+}
+
+func TestParse_PreservesEmptyPredicateType(t *testing.T) {
+	statement := []byte(`{"_type":"https://in-toto.io/Statement/v1","predicate":{}}`)
+	body, _ := json.Marshal(map[string]any{"dsseEnvelope": map[string]any{
+		"payload": base64.StdEncoding.EncodeToString(statement),
+	}})
+	attestation, err := Parse(body)
+	if err != nil || attestation == nil || attestation.PredicateType != "" {
+		t.Fatalf("Parse = (%#v, %v)", attestation, err)
 	}
 }
 

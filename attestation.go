@@ -33,6 +33,7 @@ const (
 const (
 	inTotoStatementV01Type = "https://in-toto.io/Statement/v0.1"
 	inTotoStatementV1Type  = "https://in-toto.io/Statement/v1"
+	inTotoPayloadType      = "application/vnd.in-toto+json"
 )
 
 // Attestation is the identity-side projection of an in-toto statement. Field
@@ -139,13 +140,13 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 		if err := json.Unmarshal(raw, &b); err != nil {
 			return nil, fmt.Errorf("decode bundle: %w", err)
 		}
-		attestation, err = parseEnvelope(b.DSSEEnvelope, b.VerificationMaterial)
+		attestation, err = parseEnvelopeClaims(b.DSSEEnvelope, b.VerificationMaterial)
 	case shape.Payload != nil && (shape.PayloadType != nil || shape.Signatures != nil):
 		var envelope dsseEnvelope
 		if err := json.Unmarshal(raw, &envelope); err != nil {
 			return nil, fmt.Errorf("decode DSSE envelope: %w", err)
 		}
-		attestation, err = parseEnvelope(envelope, verificationMaterial{})
+		attestation, err = parseEnvelopeClaims(envelope, verificationMaterial{})
 	case supportedRawStatementType(shape.StatementType):
 		if shape.PredicateType == nil {
 			return nil, errors.New("in-toto statement is missing predicateType")
@@ -153,6 +154,9 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 		var stmt statement
 		if err := json.Unmarshal(raw, &stmt); err != nil {
 			return nil, fmt.Errorf("decode in-toto statement: %w", err)
+		}
+		if stmt.PredicateType == "" {
+			return nil, errors.New("in-toto statement has an empty predicateType")
 		}
 		attestation = attestationFromStatement(stmt)
 	}
@@ -163,6 +167,38 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 		return nil, nil
 	}
 	return []Attestation{*attestation}, nil
+}
+
+func parseEnvelopeClaims(
+	envelope dsseEnvelope,
+	material verificationMaterial,
+) (*Attestation, error) {
+	supported, err := inTotoEnvelope(envelope)
+	if err != nil || !supported {
+		return nil, err
+	}
+	attestation, err := parseEnvelope(envelope, material)
+	if err != nil || attestation == nil {
+		return attestation, err
+	}
+	if attestation.PredicateType == "" {
+		return nil, errors.New("in-toto statement has an empty predicateType")
+	}
+	return attestation, nil
+}
+
+func inTotoEnvelope(envelope dsseEnvelope) (bool, error) {
+	if envelope.PayloadType == nil {
+		return true, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(envelope.PayloadType), []byte("null")) {
+		return false, errors.New("DSSE payloadType is null")
+	}
+	var payloadType string
+	if err := json.Unmarshal(envelope.PayloadType, &payloadType); err != nil {
+		return false, fmt.Errorf("decode DSSE payloadType: %w", err)
+	}
+	return payloadType == inTotoPayloadType, nil
 }
 
 func parseEnvelope(envelope dsseEnvelope, material verificationMaterial) (*Attestation, error) {
@@ -207,13 +243,17 @@ func supportedRawStatementType(raw json.RawMessage) bool {
 func attestationFromStatement(stmt statement) *Attestation {
 	att := &Attestation{
 		PredicateType: stmt.PredicateType,
-		BuilderID:     stmt.Predicate.RunDetails.Builder.ID,
 		Subjects:      make([]Subject, 0, len(stmt.Subjects)),
 	}
 	for _, subject := range stmt.Subjects {
 		att.Subjects = append(att.Subjects, Subject(subject))
 	}
-	for _, dep := range stmt.Predicate.BuildDefinition.ResolvedDependencies {
+	var provenance predicate
+	if err := json.Unmarshal(stmt.Predicate, &provenance); err != nil {
+		return att
+	}
+	att.BuilderID = provenance.RunDetails.Builder.ID
+	for _, dep := range provenance.BuildDefinition.ResolvedDependencies {
 		rest, ok := strings.CutPrefix(dep.URI, "git+")
 		if !ok {
 			continue
@@ -250,7 +290,8 @@ type bundle struct {
 }
 
 type dsseEnvelope struct {
-	Payload json.RawMessage `json:"payload"`
+	Payload     json.RawMessage `json:"payload"`
+	PayloadType json.RawMessage `json:"payloadType"`
 }
 
 type verificationMaterial struct {
@@ -267,10 +308,10 @@ type chain struct {
 }
 
 type statement struct {
-	Type          string    `json:"_type"`
-	PredicateType string    `json:"predicateType"`
-	Subjects      []subject `json:"subject"`
-	Predicate     predicate `json:"predicate"`
+	Type          string          `json:"_type"`
+	PredicateType string          `json:"predicateType"`
+	Subjects      []subject       `json:"subject"`
+	Predicate     json.RawMessage `json:"predicate"`
 }
 
 type subject struct {
