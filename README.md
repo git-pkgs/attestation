@@ -1,6 +1,6 @@
 # attestation
 
-Parses a sigstore bundle's DSSE envelope and the in-toto statement inside it, returning the SLSA Provenance v1 identity fields (predicate type, builder, source repository, source revision, signer identity).
+Parses identity claims from raw in-toto statements, DSSE envelopes, and sigstore bundles. It returns the predicate type, subjects and digests, builder, source repository, source revision, and signer identity when present.
 
 Cross-ecosystem: npm, PyPI (trusted publishing), Maven Central, Cargo, and GitHub artifact attestations all emit the same DSSE-wrapped in-toto statement. One parser serves all of them.
 
@@ -19,7 +19,19 @@ if att == nil { return nil } // not a SLSA Provenance v1 statement
 fmt.Println(att.BuilderID, att.SourceRepository, att.SourceRevision)
 ```
 
-`Parse` returns `(nil, nil)` for an empty body or a bundle whose DSSE payload is empty (some sigstore bundles carry non-SLSA predicates that this parser intentionally ignores). It errors only on malformed DSSE / in-toto JSON.
+`Parse` returns `(nil, nil)` for an empty body or a bundle whose DSSE payload is empty. It errors on malformed DSSE or in-toto JSON.
+
+Use `ParseAll` for committed attestation files. It accepts raw statements, DSSE envelopes, sigstore bundles, JSON arrays, and JSONL streams:
+
+```go
+claims, err := attestation.ParseAll(fileBytes)
+if err != nil { return err }
+for _, claim := range claims {
+    fmt.Println(claim.PredicateType, claim.Subjects)
+}
+```
+
+Unrecognized JSON objects are ignored. The returned values are claims made by the document.
 
 ## What's in the bundle, what's NOT verified
 
