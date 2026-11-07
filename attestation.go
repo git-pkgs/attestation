@@ -146,14 +146,15 @@ func parseDocument(raw json.RawMessage) ([]Attestation, error) {
 			return nil, fmt.Errorf("decode DSSE envelope: %w", err)
 		}
 		attestation, err = parseEnvelope(envelope, verificationMaterial{})
-	case shape.PredicateType != nil && shape.StatementType != nil:
+	case supportedRawStatementType(shape.StatementType):
+		if shape.PredicateType == nil {
+			return nil, errors.New("in-toto statement is missing predicateType")
+		}
 		var stmt statement
 		if err := json.Unmarshal(raw, &stmt); err != nil {
 			return nil, fmt.Errorf("decode in-toto statement: %w", err)
 		}
-		if supportedStatementType(stmt.Type) {
-			attestation = attestationFromStatement(stmt)
-		}
+		attestation = attestationFromStatement(stmt)
 	}
 	if err != nil {
 		return nil, err
@@ -196,6 +197,11 @@ func parseEnvelope(envelope dsseEnvelope, material verificationMaterial) (*Attes
 
 func supportedStatementType(value string) bool {
 	return value == inTotoStatementV01Type || value == inTotoStatementV1Type
+}
+
+func supportedRawStatementType(raw json.RawMessage) bool {
+	var value string
+	return json.Unmarshal(raw, &value) == nil && supportedStatementType(value)
 }
 
 func attestationFromStatement(stmt statement) *Attestation {
