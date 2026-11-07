@@ -1,7 +1,5 @@
-// Package attestation parses a sigstore bundle's DSSE envelope and the
-// in-toto statement inside it, returning the SLSA Provenance v1
-// identity fields (predicate type, builder, source repo, source
-// revision, signer identity).
+// Package attestation parses identity claims from in-toto statements, DSSE
+// envelopes, and sigstore bundles.
 //
 // The package has no dependencies outside the standard library. It's
 // intentionally self-contained so it can lift out to its own module
@@ -14,11 +12,14 @@
 package attestation
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -29,10 +30,9 @@ const (
 	digestAlgGitCommit = "gitCommit"
 )
 
-// Attestation is the identity-side projection of a SLSA Provenance v1
-// statement carried inside a sigstore bundle. Field names follow the
-// SLSA v1 vocabulary; the parser populates whichever fields the
-// statement carries and leaves the rest as zero values.
+// Attestation is the identity-side projection of an in-toto statement. Field
+// names follow the SLSA v1 vocabulary; other predicate types may leave those
+// fields empty.
 type Attestation struct {
 	// PredicateType is the in-toto statement's predicate type URI,
 	// "https://slsa.dev/provenance/v1" for SLSA Provenance v1.
@@ -55,13 +55,22 @@ type Attestation struct {
 	// first URI SAN (the OIDC identity that was bound at signing time)
 	// or its first email SAN if no URIs are present.
 	SignerIdentity string
+
+	// Subjects are the artifacts named by the in-toto statement and their
+	// claimed digests.
+	Subjects []Subject
+}
+
+// Subject is an artifact named by an in-toto statement.
+type Subject struct {
+	Name   string
+	Digest map[string]string
 }
 
 // Parse decodes a sigstore bundle body and returns the SLSA Provenance
 // v1 identity fields it claims. Returns (nil, nil) for an empty body
-// or for a bundle whose DSSE payload is empty (the latter happens for
-// non-provenance bundles that share the sigstore shape). Errors on
-// malformed DSSE / in-toto JSON.
+// or for a bundle whose DSSE payload is empty. Errors on malformed DSSE or
+// in-toto JSON.
 func Parse(body []byte) (*Attestation, error) {
 	if len(body) == 0 {
 		return nil, nil
@@ -70,10 +79,89 @@ func Parse(body []byte) (*Attestation, error) {
 	if err := json.Unmarshal(body, &b); err != nil {
 		return nil, fmt.Errorf("decode bundle: %w", err)
 	}
-	if b.DSSEEnvelope.Payload == "" {
+	return parseEnvelope(b.DSSEEnvelope, b.VerificationMaterial)
+}
+
+// ParseAll extracts claims from raw in-toto statements, DSSE envelopes,
+// sigstore bundles, JSON arrays, or JSONL streams. Unrecognized JSON objects
+// are ignored. The returned identities and digests are claims, not verified
+// facts.
+func ParseAll(body []byte) ([]Attestation, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var attestations []Attestation
+	for document := 1; ; document++ {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			if errors.Is(err, io.EOF) {
+				return attestations, nil
+			}
+			return nil, fmt.Errorf("decode attestation document %d: %w", document, err)
+		}
+		parsed, err := parseDocument(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse attestation document %d: %w", document, err)
+		}
+		attestations = append(attestations, parsed...)
+	}
+}
+
+func parseDocument(raw json.RawMessage) ([]Attestation, error) {
+	var documents []json.RawMessage
+	if len(raw) > 0 && raw[0] == '[' {
+		if err := json.Unmarshal(raw, &documents); err != nil {
+			return nil, fmt.Errorf("decode attestation array: %w", err)
+		}
+		var attestations []Attestation
+		for index, document := range documents {
+			parsed, err := parseDocument(document)
+			if err != nil {
+				return nil, fmt.Errorf("parse array item %d: %w", index+1, err)
+			}
+			attestations = append(attestations, parsed...)
+		}
+		return attestations, nil
+	}
+
+	var shape documentShape
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		return nil, err
+	}
+	var attestation *Attestation
+	var err error
+	switch {
+	case shape.DSSEEnvelope != nil:
+		var b bundle
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, fmt.Errorf("decode bundle: %w", err)
+		}
+		attestation, err = parseEnvelope(b.DSSEEnvelope, b.VerificationMaterial)
+	case shape.Payload != "":
+		var envelope dsseEnvelope
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return nil, fmt.Errorf("decode DSSE envelope: %w", err)
+		}
+		attestation, err = parseEnvelope(envelope, verificationMaterial{})
+	case shape.PredicateType != "":
+		var stmt statement
+		if err := json.Unmarshal(raw, &stmt); err != nil {
+			return nil, fmt.Errorf("decode in-toto statement: %w", err)
+		}
+		attestation = attestationFromStatement(stmt)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if attestation == nil {
 		return nil, nil
 	}
-	payload, err := base64.StdEncoding.DecodeString(b.DSSEEnvelope.Payload)
+	return []Attestation{*attestation}, nil
+}
+
+func parseEnvelope(envelope dsseEnvelope, material verificationMaterial) (*Attestation, error) {
+	if envelope.Payload == "" {
+		return nil, nil
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("decode DSSE payload: %w", err)
 	}
@@ -81,10 +169,19 @@ func Parse(body []byte) (*Attestation, error) {
 	if err := json.Unmarshal(payload, &stmt); err != nil {
 		return nil, fmt.Errorf("decode in-toto statement: %w", err)
 	}
+	attestation := attestationFromStatement(stmt)
+	attestation.SignerIdentity = extractSignerIdentity(material)
+	return attestation, nil
+}
 
+func attestationFromStatement(stmt statement) *Attestation {
 	att := &Attestation{
 		PredicateType: stmt.PredicateType,
 		BuilderID:     stmt.Predicate.RunDetails.Builder.ID,
+		Subjects:      make([]Subject, 0, len(stmt.Subjects)),
+	}
+	for _, subject := range stmt.Subjects {
+		att.Subjects = append(att.Subjects, Subject(subject))
 	}
 	for _, dep := range stmt.Predicate.BuildDefinition.ResolvedDependencies {
 		rest, ok := strings.CutPrefix(dep.URI, "git+")
@@ -105,8 +202,13 @@ func Parse(body []byte) (*Attestation, error) {
 		}
 		break
 	}
-	att.SignerIdentity = extractSignerIdentity(b.VerificationMaterial)
-	return att, nil
+	return att
+}
+
+type documentShape struct {
+	DSSEEnvelope  json.RawMessage `json:"dsseEnvelope"`
+	Payload       string          `json:"payload"`
+	PredicateType string          `json:"predicateType"`
 }
 
 type bundle struct {
@@ -133,7 +235,13 @@ type chain struct {
 
 type statement struct {
 	PredicateType string    `json:"predicateType"`
+	Subjects      []subject `json:"subject"`
 	Predicate     predicate `json:"predicate"`
+}
+
+type subject struct {
+	Name   string            `json:"name"`
+	Digest map[string]string `json:"digest"`
 }
 
 type predicate struct {
